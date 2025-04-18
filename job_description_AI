@@ -1,0 +1,115 @@
+import pandas as pd
+import csv
+import numpy as np
+from datetime import datetime
+from jobspy import scrape_jobs
+import spacy
+from skillNer.utils import Utils
+
+from skillNer.general_params import SKILL_DB
+
+# Load SpaCy model
+nlp = spacy.load("en_core_web_sm")
+
+# Initialize Utils with the SpaCy model and skills database
+utils = Utils(nlp=nlp, skills_db=SKILL_DB)
+
+# Define custom skill categories
+custom_categories = {
+    "Machine Learning": ["machine learning", "deep learning", "neural networks", "artificial intelligence"],
+    "Business Intelligence": ["power bi", "tableau", "qlik", "bi tools"],
+    "Statistics": ["probability", "statistical modeling", "hypothesis testing", "regression"],
+    "Data Analytics": ["data analysis", "data mining", "excel", "analytics"],
+    "Business Strategy": ["strategic planning", "business strategy", "competitive analysis"],
+    "Financial Services": ["finance", "accounting", "financial modeling", "investment"],
+    "Medical": ["healthcare", "clinical", "medical records", "patient care"]
+}
+
+# Configuration
+site_name = ["indeed", "linkedin"]
+location = "San Antonio, TX"
+results_wanted = 100
+
+# Job title input
+search_term = input("Enter the job title you want to search for (press Enter to use 'Data Analyst'): ")
+if not search_term:
+    search_term = "Data Analyst"
+
+# Function to adjust salary if it's below 200
+def adjust_salary(salary):
+    if salary < 200:
+        salary = salary * 2000
+    return salary
+
+try:
+    # Scrape job postings
+    jobs = scrape_jobs(
+        site_name=site_name,
+        search_term=search_term,
+        location=location,
+        results_wanted=results_wanted
+    )
+
+    if jobs.empty:
+        print(f"No job postings found for '{search_term}' in {location}.")
+    else:
+        print("Scraping successful!")
+
+        # Check if 'salary_year_avg' column exists
+        if "salary_year_avg" in jobs.columns:
+            # Make sure salary is numeric, converting non-numeric entries to NaN
+            jobs["salary_year_avg"] = pd.to_numeric(jobs["salary_year_avg"], errors='coerce')
+
+            # Adjust salaries if necessary
+            jobs["salary_year_avg"] = jobs["salary_year_avg"].apply(adjust_salary)
+
+            # Salary stats
+            salaries = jobs["salary_year_avg"].dropna()
+            mean_salary = salaries.mean()
+            std_salary = salaries.std()
+
+            print(f"Mean Salary: ${mean_salary:.2f}, Std Dev: ${std_salary:.2f}")
+        else:
+            print("No 'salary_year_avg' column found in the scraped data.")
+            mean_salary = np.nan
+            std_salary = np.nan
+
+        # Add salary stats columns
+        jobs["mean_salary"] = mean_salary
+        jobs["salary_std"] = std_salary
+
+        # Skill categorization counts
+        skill_counts_list = []
+        for desc in jobs["description"]:
+            category_counts = {key: 0 for key in custom_categories}
+            try:
+                result = utils.annotate(desc)
+                for match in result["results"]["full_matches"]:
+                    skill_found = match["skill"].lower()
+                    for category, keywords in custom_categories.items():
+                        if any(keyword in skill_found for keyword in keywords):
+                            category_counts[category] += 1
+            except Exception as e:
+                print("Skill extraction error:", e)
+            skill_counts_list.append(category_counts)
+
+        # Add skill counts to DataFrame
+        skill_counts_df = pd.DataFrame(skill_counts_list)
+        jobs = pd.concat([jobs.reset_index(drop=True), skill_counts_df.reset_index(drop=True)], axis=1)
+
+        # Ensure at least 1 word in each category (except "business strategy" and "medical")
+        for category in custom_categories:
+            if category not in ["Business Strategy", "Medical"]:
+                missing_category = jobs[jobs[category] < 1]
+                if not missing_category.empty:
+                    print(f"Some jobs are missing skills for the category: {category}")
+                    # Optionally, you could flag these jobs as not clean or take some action here
+
+        # Export to CSV
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"job_postings_skills_{timestamp}.csv"
+        jobs.to_csv(filename, quoting=csv.QUOTE_NONNUMERIC, escapechar="\\", index=False)
+        print(f"Data exported to {filename}")
+
+except Exception as e:
+    print("Something went wrong:", e)
